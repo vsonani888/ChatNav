@@ -1,23 +1,20 @@
 (function () {
   if (document.getElementById("chatnav-sidebar")) return;
 
-  // ── State ────────────────────────────────────────────────────────────────────
-  const nodes    = new Map(); // id → { id, parent_id, topic, user_request, response_one_line, element }
-  const children = new Map(); // parentId|"__root__" → [childId, ...]
-  let activePath = [];        // [id, id, ...] root → current leaf, always the visible branch
+  const CONTAINER_SEL = "div.flex-1.flex.flex-col.px-4.max-w-3xl.mx-auto.w-full.pt-1";
 
   // ── Styles ───────────────────────────────────────────────────────────────────
   const style = document.createElement("style");
   style.textContent = `
     #chatnav-sidebar {
-      --cn-bg:          #f9f9f7;
-      --cn-border:      rgba(0,0,0,0.07);
-      --cn-divider:     rgba(0,0,0,0.06);
-      --cn-text:        #111827;
-      --cn-sub:         #6b7280;
-      --cn-arrow:       #d1d5db;
-      --cn-arrow-on:    #6b7280;
-      --cn-hover:       rgba(0,0,0,0.04);
+      --cn-bg:      #f9f9f7;
+      --cn-border:  rgba(0,0,0,0.07);
+      --cn-divider: rgba(0,0,0,0.06);
+      --cn-text:    #111827;
+      --cn-sub:     #6b7280;
+      --cn-arrow:   #d1d5db;
+      --cn-arrowon: #6b7280;
+      --cn-hover:   rgba(0,0,0,0.04);
 
       position: fixed;
       top: 60px;
@@ -39,14 +36,14 @@
 
     @media (prefers-color-scheme: dark) {
       #chatnav-sidebar {
-        --cn-bg:       #1f1f1f;
-        --cn-border:   rgba(255,255,255,0.08);
-        --cn-divider:  rgba(255,255,255,0.06);
-        --cn-text:     #e5e7eb;
-        --cn-sub:      #9ca3af;
-        --cn-arrow:    #374151;
-        --cn-arrow-on: #9ca3af;
-        --cn-hover:    rgba(255,255,255,0.05);
+        --cn-bg:      #1f1f1f;
+        --cn-border:  rgba(255,255,255,0.08);
+        --cn-divider: rgba(255,255,255,0.06);
+        --cn-text:    #e5e7eb;
+        --cn-sub:     #9ca3af;
+        --cn-arrow:   #374151;
+        --cn-arrowon: #9ca3af;
+        --cn-hover:   rgba(255,255,255,0.05);
       }
     }
 
@@ -88,7 +85,6 @@
       scrollbar-color: var(--cn-arrow) transparent;
     }
 
-    /* each row = left arrow | content | right arrow */
     .cn-row {
       display: flex;
       align-items: stretch;
@@ -101,7 +97,7 @@
       flex-shrink: 0;
       background: none;
       border: none;
-      color: var(--cn-arrow-on);
+      color: var(--cn-arrowon);
       font-size: 15px;
       cursor: pointer;
       display: flex;
@@ -190,101 +186,141 @@
       .replace(/>/g, "&gt;");
   }
 
-  function isVisible(el) {
-    return el &&
-      document.body.contains(el) &&
-      el.offsetHeight > 0 &&
-      el.offsetParent !== null;
+  function parseSummaryJson(text) {
+    const match = text.match(/<summary_json>([\s\S]*?)<\/summary_json>/);
+    if (!match) return null;
+    try { return JSON.parse(match[1].trim()); } catch { return null; }
   }
 
-  function siblingsOf(id) {
-    const node = nodes.get(id);
-    if (!node) return [];
-    return children.get(node.parent_id || "__root__") || [];
+  function findEditCounter(turnEl) {
+    const spans = turnEl.querySelectorAll("span");
+    for (const span of spans) {
+      if (/^\d+ \/ \d+$/.test(span.textContent.trim())) return span;
+    }
+    return null;
   }
 
-  // ── Sibling navigation ───────────────────────────────────────────────────────
-  function navigateSibling(nodeId, dir) {
-    const sibs = siblingsOf(nodeId);
-    const idx  = sibs.indexOf(nodeId);
-    const next = idx + dir;
-    if (next < 0 || next >= sibs.length) return;
+  function findNativeNavButtons(counterSpan) {
+    let el = counterSpan.parentElement;
+    for (let i = 0; i < 5; i++) {
+      if (!el) break;
+      const buttons = el.querySelectorAll("button");
+      if (buttons.length >= 2) {
+        return { prev: buttons[0], next: buttons[buttons.length - 1] };
+      }
+      el = el.parentElement;
+    }
+    return null;
+  }
 
-    const newId = sibs[next];
-    const depth = activePath.indexOf(nodeId);
-    if (depth === -1) return;
+  // ── Read turns from Claude's DOM ─────────────────────────────────────────────
+  function readTurns() {
+    const container = document.querySelector(CONTAINER_SEL);
+    if (!container) return [];
 
-    // Replace from this depth with the new sibling,
-    // then follow first-child down to leaf
-    activePath = activePath.slice(0, depth);
-    activePath.push(newId);
-    let cur = newId;
-    while (true) {
-      const kids = children.get(cur) || [];
-      if (!kids.length) break;
-      cur = kids[0];
-      activePath.push(cur);
+    const turns = [];
+    const children = Array.from(container.children);
+
+    for (let i = 0; i < children.length; i++) {
+      const child = children[i];
+      const text = child.innerText || "";
+      const data = parseSummaryJson(text);
+      if (!data || !data.topic) continue;
+
+      // Look at the previous sibling for edit controls (user turn)
+      const userTurn = children[i - 1] || null;
+      let counterSpan = null;
+      let navButtons = null;
+      let current = 1;
+      let total = 1;
+
+      if (userTurn) {
+        counterSpan = findEditCounter(userTurn);
+        if (counterSpan) {
+          const parts = counterSpan.textContent.trim().split(" / ");
+          current = parseInt(parts[0], 10);
+          total = parseInt(parts[1], 10);
+          navButtons = findNativeNavButtons(counterSpan);
+        }
+      }
+
+      turns.push({
+        data,
+        responseTurn: child,
+        userTurn,
+        current,
+        total,
+        navButtons,
+      });
     }
 
-    render();
-
-    const newNode = nodes.get(newId);
-    if (newNode?.element && isVisible(newNode.element)) {
-      newNode.element.scrollIntoView({ behavior: "smooth", block: "start" });
-    }
+    return turns;
   }
 
   // ── Render ───────────────────────────────────────────────────────────────────
+  let lastRenderKey = "";
+
   function render() {
     const body = document.getElementById("chatnav-body");
+
+    const turns = readTurns();
+
+    const renderKey = turns.map(t =>
+      `${t.data.topic}|${t.data.user_request}|${t.current}/${t.total}`
+    ).join("::");
+
+    if (renderKey === lastRenderKey) return;
+    lastRenderKey = renderKey;
+
     body.innerHTML = "";
 
-    if (!activePath.length) {
+    if (!turns.length) {
       body.innerHTML = `<div class="cn-empty">Send a message to build your nav.</div>`;
       return;
     }
 
-    for (const id of activePath) {
-      const node = nodes.get(id);
-      if (!node) continue;
-
-      const sibs     = siblingsOf(id);
-      const idx      = sibs.indexOf(id);
-      const hasPrev  = idx > 0;
-      const hasNext  = idx < sibs.length - 1;
-      const multi    = sibs.length > 1;
+    for (const turn of turns) {
+      const { data, responseTurn, current, total, navButtons } = turn;
+      const hasPrev = navButtons && current > 1;
+      const hasNext = navButtons && current < total;
+      const multi = total > 1;
 
       const row = document.createElement("div");
       row.className = "cn-row";
 
-      // Left arrow
       const lBtn = document.createElement("button");
       lBtn.className = `cn-arrow${hasPrev ? "" : " off"}`;
       lBtn.textContent = "‹";
-      lBtn.title = "Previous branch";
-      lBtn.addEventListener("click", () => navigateSibling(id, -1));
+      lBtn.title = "Previous edit";
+      if (hasPrev) {
+        lBtn.addEventListener("click", () => {
+          navButtons.prev.click();
+          setTimeout(render, 400);
+        });
+      }
 
-      // Content
       const content = document.createElement("div");
       content.className = "cn-content";
-      content.title = node.response_one_line || "";
+      content.title = data.response_one_line || "";
       content.innerHTML = `
-        <div class="cn-topic">${esc(node.topic)}</div>
-        <div class="cn-sub-text">${esc(node.user_request)}</div>
-        ${multi ? `<div class="cn-siblings">${idx + 1} / ${sibs.length}</div>` : ""}
+        <div class="cn-topic">${esc(data.topic)}</div>
+        <div class="cn-sub-text">${esc(data.user_request)}</div>
+        ${multi ? `<div class="cn-siblings">${current} / ${total}</div>` : ""}
       `;
       content.addEventListener("click", () => {
-        if (node.element && isVisible(node.element)) {
-          node.element.scrollIntoView({ behavior: "smooth", block: "start" });
-        }
+        responseTurn.scrollIntoView({ behavior: "smooth", block: "start" });
       });
 
-      // Right arrow
       const rBtn = document.createElement("button");
       rBtn.className = `cn-arrow${hasNext ? "" : " off"}`;
       rBtn.textContent = "›";
-      rBtn.title = "Next branch";
-      rBtn.addEventListener("click", () => navigateSibling(id, 1));
+      rBtn.title = "Next edit";
+      if (hasNext) {
+        rBtn.addEventListener("click", () => {
+          navButtons.next.click();
+          setTimeout(render, 400);
+        });
+      }
 
       row.appendChild(lBtn);
       row.appendChild(content);
@@ -293,101 +329,25 @@
     }
   }
 
-  // ── Active path: follow what's visible in Claude's DOM ───────────────────────
-  function updateActivePath() {
-    const visible = [];
-    for (const [id, node] of nodes) {
-      if (isVisible(node.element)) {
-        visible.push({ id, node });
-      }
-    }
-
-    if (!visible.length) return;
-
-    // Sort by DOM order
-    visible.sort((a, b) => {
-      const pos = a.node.element.compareDocumentPosition(b.node.element);
-      return (pos & Node.DOCUMENT_POSITION_FOLLOWING) ? -1 : 1;
-    });
-
-    const newPath = visible.map(v => v.id);
-
-    // Only re-render if something actually changed (handles Claude's own branch switching)
-    if (newPath.join(",") !== activePath.join(",")) {
-      activePath = newPath;
-      render();
-    }
-  }
-
-  // ── DOM scanning ─────────────────────────────────────────────────────────────
-  function findMessageContainer(textNode) {
-    let el = textNode.parentElement;
-    for (let i = 0; i < 12; i++) {
-      if (!el || el === document.body) break;
-      const testId = el.getAttribute("data-testid") || "";
-      if (
-        testId.includes("message") ||
-        testId.includes("turn") ||
-        (el.tagName === "DIV" && el.offsetHeight > 80 && el.offsetWidth > 200)
-      ) return el;
-      el = el.parentElement;
-    }
-    return textNode.parentElement;
-  }
-
+  // ── Observer ─────────────────────────────────────────────────────────────────
   let scanTimer;
   function scheduleScan() {
     clearTimeout(scanTimer);
-    scanTimer = setTimeout(scan, 600);
+    scanTimer = setTimeout(render, 600);
   }
 
-  function scan() {
-    const walker = document.createTreeWalker(
-      document.body,
-      NodeFilter.SHOW_TEXT,
-      {
-        acceptNode(n) {
-          return n.textContent.includes("</summary_json>")
-            ? NodeFilter.FILTER_ACCEPT
-            : NodeFilter.FILTER_REJECT;
-        }
-      }
-    );
-
-    let textNode;
-    while ((textNode = walker.nextNode())) {
-      const fullText = textNode.parentElement?.innerText || textNode.textContent;
-      const match = fullText.match(/<summary_json>([\s\S]*?)<\/summary_json>/);
-      if (!match) continue;
-
-      let data;
-      try { data = JSON.parse(match[1].trim()); } catch { continue; }
-      if (!data?.id) continue;
-
-      const container = findMessageContainer(textNode);
-
-      if (nodes.has(data.id)) {
-        // Refresh element ref in case Claude rebuilt the DOM for this node
-        nodes.get(data.id).element = container;
-      } else {
-        // New node — register it
-        nodes.set(data.id, { ...data, element: container });
-        const pid = data.parent_id || "__root__";
-        if (!children.has(pid)) children.set(pid, []);
-        if (!children.get(pid).includes(data.id)) {
-          children.get(pid).push(data.id);
-        }
-      }
-    }
-
-    // After every scan, sync active path to what's visible
-    // (catches both new nodes AND Claude's own branch switching)
-    updateActivePath();
-  }
-
-  // ── Observer ─────────────────────────────────────────────────────────────────
   const observer = new MutationObserver(scheduleScan);
   observer.observe(document.body, { childList: true, subtree: true, characterData: true });
 
-  scan();
+  // ── Conversation change detection ────────────────────────────────────────────
+  let currentPath = location.pathname;
+
+  new MutationObserver(() => {
+    if (location.pathname !== currentPath) {
+      currentPath = location.pathname;
+      render();
+    }
+  }).observe(document, { subtree: true, childList: true });
+
+  render();
 })();

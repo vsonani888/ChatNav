@@ -1,54 +1,48 @@
-const INPUT_SELECTOR = 'div[contenteditable="true"].ProseMirror';
-const SEND_BUTTON_SELECTOR = 'button[aria-label="Send message"]';
+const DEFAULT_PROMPT = `You must append a valid JSON block at the end of every response.
+
+Format:
+
+<summary_json>
+{
+  "topic": "",
+  "user_request": "",
+  "response_one_line": ""
+}
+</summary_json>
+
+Field definitions:
+- topic: 2–5 word neutral label (NOT a sentence, no "user asked/requested")
+- user_request: 5–10 word summary of the request
+- response_one_line: one concise sentence summary
+
+Rules:
+- topic must be a clean label suitable for UI display
+- Start with memorable nouns or key phrases
+- Neutral, third-person, instruction-manual language
+- No time sequence language
+- Output valid JSON only inside the tags
+- Always place at the very end`;
 
 let enabled = true;
-let prompt = "";
 
-chrome.storage.sync.get(["enabled", "prompt"], (result) => {
+chrome.storage.sync.get(["enabled"], (result) => {
   if (result.enabled !== undefined) enabled = result.enabled;
-  if (result.prompt) prompt = result.prompt;
+  chrome.storage.sync.set({ prompt: DEFAULT_PROMPT });
 });
 
 chrome.storage.onChanged.addListener((changes) => {
   if (changes.enabled !== undefined) enabled = changes.enabled.newValue;
-  if (changes.prompt !== undefined) prompt = changes.prompt.newValue;
 });
 
-function generateId() {
-  return Math.random().toString(36).substr(2, 6);
-}
-
-function getLastResponseId() {
-  const bodyText = document.body.innerText;
-  const matches = [...bodyText.matchAll(/<summary_json>([\s\S]*?)<\/summary_json>/g)];
-  if (!matches.length) return null;
-  try {
-    const data = JSON.parse(matches[matches.length - 1][1].trim());
-    return data.id || null;
-  } catch {
-    return null;
-  }
-}
+const INPUT_SELECTOR = 'div[contenteditable="true"].ProseMirror';
 
 function injectPrompt() {
   if (!enabled) return;
-  if (!prompt) return;
-
   const editor = document.querySelector(INPUT_SELECTOR);
   if (!editor) return;
-
   const userText = editor.innerText.trim();
-  if (!userText) return;
-
-  if (userText.startsWith(prompt.substring(0, 20))) return;
-
-  const newId = generateId();
-  const parentId = getLastResponseId();
-
-  const idInstruction = `\n\nFor the summary_json, use these exact values:\n"id": "${newId}"\n"parent_id": ${parentId ? `"${parentId}"` : "null"}`;
-
-  const injected = prompt + idInstruction + "\n\n" + userText;
-
+  if (userText.startsWith(DEFAULT_PROMPT.substring(0, 20))) return;
+  const injected = userText ? DEFAULT_PROMPT + "\n\n" + userText : DEFAULT_PROMPT;
   editor.focus();
   const range = document.createRange();
   range.selectNodeContents(editor);
@@ -60,14 +54,12 @@ function injectPrompt() {
 document.addEventListener("keydown", (e) => {
   if (e.key === "Enter" && !e.shiftKey) {
     const editor = document.querySelector(INPUT_SELECTOR);
-    if (editor && document.activeElement === editor) {
-      injectPrompt();
-    }
+    if (editor && document.activeElement === editor) injectPrompt();
   }
 }, true);
 
-document.addEventListener("click", (e) => {
-  if (e.target.closest(SEND_BUTTON_SELECTOR)) {
-    injectPrompt();
-  }
+document.addEventListener("mousedown", (e) => {
+  if (!e.target.closest("button")) return;
+  const editor = document.querySelector(INPUT_SELECTOR);
+  if (editor) injectPrompt();
 }, true);
