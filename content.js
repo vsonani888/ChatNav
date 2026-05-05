@@ -8,7 +8,7 @@ Format:
   "user_request": "",
   "response_one_line": ""
 }
-</summary_json>
+</summary_json> 
 
 Field definitions:
 - topic: 2–5 word neutral label (NOT a sentence, no "user asked/requested")
